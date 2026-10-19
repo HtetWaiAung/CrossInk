@@ -40,7 +40,6 @@ jobs:
         run: |
           python3 -c "
           import os, re
-          # Find myanmar.yaml and format _order with quotes: _order: \"99\"
           for root, _, files in os.walk('.'):
               for f in files:
                   if f.endswith('.yaml') and 'myanmar' in f:
@@ -58,8 +57,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PlatformIO
-        run: pip install -U platformio
+      - name: Install Pinned PlatformIO & SCons
+        run: |
+          pip install "platformio==6.1.16" "pioarduino==6.1.19"
+          mkdir -p ~/.platformio/penv
+          python3 -m venv ~/.platformio/penv
+          ~/.platformio/penv/bin/pip install "platformio==6.1.16" "pioarduino==6.1.19"
+          # Ensure patch files use LF line endings
+          sed -i 's/\r$//' scripts/sdfat_patches/*.patch 2>/dev/null || true
 
       - name: Compile Firmware for XTEINK X4
         run: pio run -e default
