@@ -1,0 +1,49 @@
+name: Build CrossInk Myanmar Firmware
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CrossInk
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Merge Myanmar Shaping Engine & Assets
+        run: |
+          git config user.name "HtetWaiAung"
+          git config user.email "actions@github.com"
+          git remote add myanmar https://github.com/bhonemyinthtoo999-pixel/CrossInk-Myanmar-Edition.git
+          git fetch myanmar
+
+          # Import HarfBuzz, runtime atlas, layout cache, and assets
+          git checkout myanmar/main -- \
+            lib/HarfBuzzTiny \
+            lib/MyanmarRuntimeFont \
+            lib/MyanmarShapedCache \
+            assets/myanmar_runtime.atlas \
+            assets/myanmar_runtime.ttf \
+            scripts/build_myanmar_runtime_assets.py \
+            lib/I18n/translations/myanmar.yaml
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      - name: Compile Firmware for XTEINK X4
+        run: pio run -e default
+
+      - name: Upload Firmware Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrossInk-v1.6.1-Myanmar-X4
+          path: .pio/build/default/firmware.bin
