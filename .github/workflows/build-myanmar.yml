@@ -26,11 +26,12 @@ jobs:
           git remote add myanmar https://github.com/bhonemyinthtoo999-pixel/CrossInk-Myanmar-Edition.git
           git fetch myanmar --tags
 
-          # Checkout directly from the verified RC2 commit hash
+          # Checkout libraries, EpdFont rendering hooks, and assets
           git checkout bde0e23c4d28c26fa79a4a4fab87afc2667840b3 -- \
             lib/HarfBuzzTiny \
             lib/MyanmarRuntimeFont \
             lib/MyanmarShapedCache \
+            lib/EpdFont \
             assets/myanmar_runtime.atlas \
             assets/myanmar_runtime.ttf \
             scripts/build_myanmar_runtime_assets.py \
@@ -63,15 +64,21 @@ jobs:
           mkdir -p ~/.platformio/penv
           python3 -m venv ~/.platformio/penv
           ~/.platformio/penv/bin/pip install "platformio==6.1.16" "pioarduino==6.1.19"
-          # Ensure patch files use LF line endings
           sed -i 's/\r$//' scripts/sdfat_patches/*.patch 2>/dev/null || true
 
       - name: Compile Firmware for XTEINK X4
         run: pio run -e default
 
-      - name: Upload Firmware Binary Artifact
+      - name: Prepare Release Package
+        run: |
+          mkdir -p package/assets
+          cp .pio/build/default/firmware.bin package/firmware.bin
+          cp assets/myanmar_runtime.atlas package/assets/
+          cp assets/myanmar_runtime.ttf package/assets/
+
+      - name: Upload Firmware and SD Assets
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: CrossInk-v1.6.1-Myanmar-X4
-          path: .pio/build/default/firmware.bin
+          name: CrossInk-v1.6.1-Myanmar-Complete-X4
+          path: package/
