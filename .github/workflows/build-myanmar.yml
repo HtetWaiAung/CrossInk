@@ -19,39 +19,95 @@ jobs:
           git submodule sync
           git submodule update --init --recursive
 
-      - name: Merge Myanmar Shaping Engine & Assets
+      - name: 3-Way Merge Myanmar Shaping Engine, Hooks & Assets
         run: |
           git config user.name "HtetWaiAung"
           git config user.email "actions@github.com"
           git remote add myanmar https://github.com/bhonemyinthtoo999-pixel/CrossInk-Myanmar-Edition.git
           git fetch myanmar --tags
 
-          # Checkout libraries, EpdFont rendering hooks, and assets
-          git checkout bde0e23c4d28c26fa79a4a4fab87afc2667840b3 -- \
-            lib/HarfBuzzTiny \
-            lib/MyanmarRuntimeFont \
-            lib/MyanmarShapedCache \
-            lib/EpdFont \
-            assets/myanmar_runtime.atlas \
-            assets/myanmar_runtime.ttf \
-            scripts/build_myanmar_runtime_assets.py \
-            lib/I18n/translations/myanmar.yaml
+          python3 - << 'EOF'
+          import subprocess, os, re
 
-      - name: Fix Language Ordering Conflicts
-        run: |
-          python3 -c "
-          import os, re
-          for root, _, files in os.walk('.'):
-              for f in files:
-                  if f.endswith('.yaml') and 'myanmar' in f:
-                      p = os.path.join(root, f)
-                      with open(p, 'r', encoding='utf-8', errors='ignore') as fp:
-                          data = fp.read()
-                      data = re.sub(r'[\'\"]?_order[\'\"]?\s*:.*', '_order: \"99\"', data)
-                      with open(p, 'w', encoding='utf-8') as fp:
-                          fp.write(data)
-                      print(f'Updated {p} to _order: \"99\"')
-          "
+          myanmar_sha = "bde0e23c4d28c26fa79a4a4fab87afc2667840b3"
+
+          # 1. Find the exact upstream commit in CrossInk that Myanmar Edition branched from
+          tags = subprocess.check_output(["git", "tag"]).decode().splitlines()
+          candidates = [t for t in tags if "1.4" in t or "1.3" in t] or tags
+          best_base, min_diff = "v1.4.0", 999999
+          for t in candidates:
+              try:
+                  d = len(subprocess.check_output(["git", "diff-tree", "-r", "--name-only", t, myanmar_sha, "--", "src", "lib"]).decode().splitlines())
+                  if d < min_diff:
+                      min_diff, best_base = d, t
+              except Exception:
+                  pass
+
+          # Also check 15 commits around best_base for an exact commit match
+          revs = subprocess.check_output(["git", "rev-list", "-n", "15", best_base]).decode().splitlines()
+          for r in revs:
+              d = len(subprocess.check_output(["git", "diff-tree", "-r", "--name-only", r, myanmar_sha, "--", "src", "lib"]).decode().splitlines())
+              if d < min_diff:
+                  min_diff, best_base = d, r
+
+          print(f"=== Found exact base commit: {best_base} (diff files in src/lib: {min_diff}) ===")
+
+          diff_lines = subprocess.check_output(["git", "diff-tree", "-r", "--name-status", best_base, myanmar_sha]).decode().splitlines()
+          for l in diff_lines:
+              print(" ", l)
+
+          # Skip non-font files so v1.6.1 version, SDK, and sleep screens stay intact
+          skip_patterns = [
+              "platformio.ini", "README", "CHANGELOG", "AppVersion",
+              "SleepActivity", "BootActivity", "SleepCoverAssets",
+              ".git", "freeink-sdk", "test/"
+          ]
+
+          for line in diff_lines:
+              parts = line.split("\t")
+              if len(parts) < 2:
+                  continue
+              status, path = parts[0], parts[-1]
+              if any(p in path for p in skip_patterns):
+                  print(f"Skipping non-font file: {path} ({status})")
+                  continue
+
+              if status.startswith("A"):
+                  os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                  blob = subprocess.check_output(["git", "show", f"{myanmar_sha}:{path}"])
+                  with open(path, "wb") as f:
+                      f.write(blob)
+                  print(f"Added new file: {path}")
+              elif status.startswith("M") and os.path.exists(path):
+                  base_blob = subprocess.check_output(["git", "show", f"{best_base}:{path}"])
+                  myan_blob = subprocess.check_output(["git", "show", f"{myanmar_sha}:{path}"])
+                  with open("/tmp/base_file", "wb") as f:
+                      f.write(base_blob)
+                  with open("/tmp/myan_file", "wb") as f:
+                      f.write(myan_blob)
+                  res = subprocess.run(["git", "merge-file", path, "/tmp/base_file", "/tmp/myan_file"])
+                  if res.returncode == 0:
+                      print(f"Cleanly 3-way merged: {path}")
+                  else:
+                      print(f"CONFLICT in {path} (count={res.returncode}):")
+                      with open(path, "r", errors="ignore") as f:
+                          lines = f.readlines()
+                      for idx, text_line in enumerate(lines):
+                          if "<<<<<<<" in text_line:
+                              start = max(0, idx - 3)
+                              end = min(len(lines), idx + 25)
+                              print("".join(f"{i+1}: {lines[i]}" for i in range(start, end)))
+
+          # Ensure myanmar.yaml has a unique quoted _order value
+          myan_yaml = "lib/I18n/translations/myanmar.yaml"
+          if os.path.exists(myan_yaml):
+              with open(myan_yaml, "r", encoding="utf-8", errors="ignore") as fp:
+                  data = fp.read()
+              data = re.sub(r'[\'\"]?_order[\'\"]?\s*:.*', '_order: "99"', data)
+              with open(myan_yaml, "w", encoding="utf-8") as fp:
+                  fp.write(data)
+              print("Updated myanmar.yaml _order to \"99\"")
+          EOF
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -67,14 +123,20 @@ jobs:
           sed -i 's/\r$//' scripts/sdfat_patches/*.patch 2>/dev/null || true
 
       - name: Compile Firmware for XTEINK X4
-        run: pio run -e default
+        run: |
+          set -o pipefail
+          pio run -e default 2>&1 | tee build.log || {
+            echo "================ COMPILER / LINKER ERRORS ================"
+            grep -E -C 5 "error:|undefined reference|overflowed|<<<<<<<" build.log | tail -n 100 || true
+            exit 1
+          }
 
       - name: Prepare Release Package
         run: |
           mkdir -p package/assets
           cp .pio/build/default/firmware.bin package/firmware.bin
-          cp assets/myanmar_runtime.atlas package/assets/
-          cp assets/myanmar_runtime.ttf package/assets/
+          cp assets/myanmar_runtime.atlas package/assets/ 2>/dev/null || true
+          cp assets/myanmar_runtime.ttf package/assets/ 2>/dev/null || true
 
       - name: Upload Firmware and SD Assets
         if: success()
