@@ -25,7 +25,7 @@ jobs:
           git config user.email "actions@github.com"
           git remote add myanmar https://github.com/bhonemyinthtoo999-pixel/CrossInk-Myanmar-Edition.git
           git fetch myanmar --tags
-          
+
           # Checkout directly from the verified RC2 commit hash
           git checkout bde0e23c4d28c26fa79a4a4fab87afc2667840b3 -- \
             lib/HarfBuzzTiny \
@@ -36,8 +36,24 @@ jobs:
             scripts/build_myanmar_runtime_assets.py \
             lib/I18n/translations/myanmar.yaml
 
-          # Fix duplicate _order conflict with portuguese-PT.yaml
-          sed -i 's/_order: 26/_order: 99/' lib/I18n/translations/myanmar.yaml
+      - name: Fix Language Ordering Conflicts
+        run: |
+          python3 -c "
+          import os, re
+          # Recursively find any myanmar.yaml translation file and set _order to 99
+          for root, _, files in os.walk('.'):
+              for f in files:
+                  if f.endswith('.yaml') and 'myanmar' in f:
+                      p = os.path.join(root, f)
+                      with open(p, 'r', encoding='utf-8', errors='ignore') as fp:
+                          data = fp.read()
+                      print(f'Found translation file: {p}')
+                      # Replace any existing order key with _order: 99
+                      data = re.sub(r'[\'\"]?_order[\'\"]?\s*:\s*[\'\"]?\d+[\'\"]?', '_order: 99', data)
+                      with open(p, 'w', encoding='utf-8') as fp:
+                          fp.write(data)
+                      print(f'Successfully updated {p} to _order: 99')
+          "
 
       - name: Set up Python
         uses: actions/setup-python@v5
