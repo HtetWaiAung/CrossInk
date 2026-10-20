@@ -41,6 +41,7 @@ class GfxRenderer {
   void setMyanmarRuntimeFont(MyanmarRuntimeFont* font) { myanmarRuntimeFont_ = font; }
   void setMyanmarShapedCache(MyanmarShapedCacheFile* cache) { myanmarShapedCache_ = cache; }
   void registerMyanmarCacheFont(int id, uint16_t px) { myanmarCachePixelSizes_[id] = px; }
+  uint16_t myanmarPixelSizeForFont(int fontId) const;
 
 
   // Logical screen orientation from the perspective of callers
