@@ -1,6 +1,8 @@
 #pragma once
 
 #include <EpdFontFamily.h>
+#include "../MyanmarRuntimeFont/MyanmarRuntimeFont.h"
+#include "../MyanmarShapedCache/MyanmarShapedCacheFile.h"
 #include <HalDisplay.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -36,6 +38,10 @@ enum Color : uint8_t { Clear = 0x00, White = 0x01, LightGray = 0x05, DarkGray = 
 class GfxRenderer {
  public:
   enum RenderMode { BW, GRAYSCALE_LSB, GRAYSCALE_MSB };
+  void setMyanmarRuntimeFont(MyanmarRuntimeFont* font) { myanmarRuntimeFont_ = font; }
+  void setMyanmarShapedCache(MyanmarShapedCacheFile* cache) { myanmarShapedCache_ = cache; }
+  void registerMyanmarCacheFont(int id, uint16_t px) { myanmarCachePixelSizes_[id] = px; }
+
 
   // Logical screen orientation from the perspective of callers
   enum Orientation {
@@ -108,6 +114,10 @@ class GfxRenderer {
   // recording to the (non-const) FontCacheManager. Same pragmatic compromise
   // as before, concentrated in a single pointer instead of four fields.
   mutable FontCacheManager* fontCacheManager_ = nullptr;
+  mutable MyanmarRuntimeFont* myanmarRuntimeFont_ = nullptr;
+  mutable MyanmarShapedCacheFile* myanmarShapedCache_ = nullptr;
+  std::map<int, uint16_t> myanmarCachePixelSizes_;
+
 
   // CJK UI font fallback map: primary (built-in, Latin-only) UI font id -> a
   // size-matched SD-card font id that carries CJK glyphs. When a string drawn

@@ -1,3 +1,5 @@
+#include <MyanmarRuntimeFont.h>
+#include <MyanmarShapedCacheFile.h>
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <CrossInkHalFrontlight.h>
@@ -122,6 +124,15 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "util/ScreenshotUtil.h"
 #include "util/SleepWakePolicy.h"
 
+extern const uint8_t myanmarRuntimeTtfStart[] asm("_binary_assets_myanmar_runtime_ttf_start");
+extern const uint8_t myanmarRuntimeTtfEnd[] asm("_binary_assets_myanmar_runtime_ttf_end");
+extern const uint8_t myanmarRuntimeAtlasStart[] asm("_binary_assets_myanmar_runtime_atlas_start");
+extern const uint8_t myanmarRuntimeAtlasEnd[] asm("_binary_assets_myanmar_runtime_atlas_end");
+MyanmarRuntimeFont myanmarRuntimeFont(myanmarRuntimeTtfStart,
+    static_cast<size_t>(myanmarRuntimeTtfEnd - myanmarRuntimeTtfStart),
+    myanmarRuntimeAtlasStart,
+    static_cast<size_t>(myanmarRuntimeAtlasEnd - myanmarRuntimeAtlasStart));
+MyanmarShapedCacheFile myanmarShapedCache;
 GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
 ActivityManager activityManager(renderer, mappedInputManager);
@@ -1187,6 +1198,24 @@ void setupDisplayAndFonts(const bool seamless, const bool loadReaderResources, c
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
+  renderer.setMyanmarRuntimeFont(&myanmarRuntimeFont);
+  renderer.registerMyanmarCacheFont(SMALL_FONT_ID, 17);
+  renderer.registerMyanmarCacheFont(UI_10_FONT_ID, 21);
+  renderer.registerMyanmarCacheFont(UI_12_FONT_ID, 25);
+  // EPUB reader fonts must use shaping too; previously only UI fonts were mapped.
+  // Glyph atlas pixel sizes are matched to the original Myanmar edition's
+  // UI scale; selectable reader families follow their point-size tiers.
+  for (const auto fontId : {LEXENDDECA_10_FONT_ID, BITTER_10_FONT_ID})
+    renderer.registerMyanmarCacheFont(fontId, 21);
+  for (const auto fontId : {LEXENDDECA_12_FONT_ID, BITTER_12_FONT_ID})
+    renderer.registerMyanmarCacheFont(fontId, 25);
+  for (const auto fontId : {LEXENDDECA_14_FONT_ID, BITTER_14_FONT_ID})
+    renderer.registerMyanmarCacheFont(fontId, 29);
+  for (const auto fontId : {LEXENDDECA_16_FONT_ID, BITTER_16_FONT_ID})
+    renderer.registerMyanmarCacheFont(fontId, 33);
+
+  if (loadReaderResources && myanmarShapedCache.begin()) renderer.setMyanmarShapedCache(&myanmarShapedCache);
+
   if (loadReaderResources) {
     sdFontSystem.begin(renderer);
   } else {

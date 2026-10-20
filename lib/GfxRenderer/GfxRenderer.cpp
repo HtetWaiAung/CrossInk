@@ -108,6 +108,45 @@ void appendShapedRtlTokens(const char* text, std::string& shapedOut) {
   std::string visual;
   forEachShapedRtlToken(text, token, visual, [&shapedOut](const char* shaped) { shapedOut += shaped; });
 }
+// Partition mixed-script strings so Latin text keeps its normal font and
+// only Myanmar runs go through the HarfBuzz Myanmar font. Runs preserve UTF-8
+// codepoint boundaries. Never split a Myanmar combining mark from its base.
+struct MyanmarScriptRun {
+  std::string text;
+  bool myanmar;
+};
+
+bool splitMixedMyanmarRuns(const char* text, std::vector<MyanmarScriptRun>& runs) {
+  if (!text) return false;
+  const auto* p = reinterpret_cast<const unsigned char*>(text);
+  bool hasMyanmar = false;
+  bool hasOther = false;
+  while (*p) {
+    const auto* start = p;
+    uint32_t cp = *p;
+    size_t length = 1;
+    if ((p[0] & 0xE0) == 0xC0 && p[1]) {
+      cp = ((p[0] & 31) << 6) | (p[1] & 63);
+      length = 2;
+    } else if ((p[0] & 0xF0) == 0xE0 && p[1] && p[2]) {
+      cp = ((p[0] & 15) << 12) | ((p[1] & 63) << 6) | (p[2] & 63);
+      length = 3;
+    } else if ((p[0] & 0xF8) == 0xF0 && p[1] && p[2] && p[3]) {
+      cp = ((p[0] & 7) << 18) | ((p[1] & 63) << 12) | ((p[2] & 63) << 6) | (p[3] & 63);
+      length = 4;
+    }
+    const bool mm = (cp >= 0x1000 && cp <= 0x109F) ||
+                    (cp >= 0xAA60 && cp <= 0xAA7F) ||
+                    (cp >= 0xA9E0 && cp <= 0xA9FF);
+    hasMyanmar |= mm;
+    hasOther |= !mm;
+    if (runs.empty() || runs.back().myanmar != mm) runs.push_back({{}, mm});
+    runs.back().text.append(reinterpret_cast<const char*>(start), length);
+    p += length;
+  }
+  return hasMyanmar && hasOther;
+}
+
 }  // namespace
 
 const uint8_t* GfxRenderer::getGlyphBitmap(const EpdFontData* fontData, const EpdGlyph* glyph) const {
@@ -1033,6 +1072,24 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     return 0;
   }
 
+  if (myanmarCachePixelSizes_.count(fontId)) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int width = 0;
+      for (const auto& run : runs) width += getTextWidth(fontId, run.text.c_str(), style, baseDir);
+      return width;
+    }
+  }
+  const auto mmSize = myanmarCachePixelSizes_.find(fontId);
+  if (mmSize != myanmarCachePixelSizes_.end() && myanmarRuntimeFont_ &&
+      myanmarRuntimeFont_->ready() && MyanmarRuntimeFont::containsMyanmar(text) &&
+      myanmarRuntimeFont_->shape(text, mmSize->second)) {
+    return myanmarRuntimeFont_->widthPixels();
+  }
+  if (mmSize != myanmarCachePixelSizes_.end() && myanmarShapedCache_ && myanmarShapedCache_->ready()) {
+    MyanmarShapedCacheFile::Entry entry;
+    if (myanmarShapedCache_->findMetrics(text, mmSize->second, entry)) return entry.width;
+  }
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
 
   std::string visualBuffer;
@@ -1117,6 +1174,49 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     return;
   }
 
+  if (myanmarCachePixelSizes_.count(fontId)) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int runX = x;
+      for (const auto& run : runs) {
+        drawText(fontId, runX, y, run.text.c_str(), black, style, baseDir);
+        runX += getTextWidth(fontId, run.text.c_str(), style, baseDir);
+      }
+      return;
+    }
+  }
+  const auto mmSize = myanmarCachePixelSizes_.find(fontId);
+  if (mmSize != myanmarCachePixelSizes_.end() && myanmarRuntimeFont_ &&
+      myanmarRuntimeFont_->ready() && MyanmarRuntimeFont::containsMyanmar(text) &&
+      myanmarRuntimeFont_->shape(text, mmSize->second)) {
+    int32_t penX = x * 64;
+    const int baseline = y + mmSize->second;
+    for (size_t i = 0; i < myanmarRuntimeFont_->glyphCount(); ++i) {
+      MyanmarRuntimeFont::ShapedGlyph shaped;
+      MyanmarGlyphAtlas::Glyph glyph;
+      if (!myanmarRuntimeFont_->glyph(i, shaped, glyph)) continue;
+      const int gx = (penX + shaped.xOffset26Dot6 + 32) / 64 + glyph.left;
+      const int gy = baseline - (shaped.yOffset26Dot6 + 32) / 64 - glyph.top;
+      uint32_t bit = 0;
+      for (uint16_t row = 0; row < glyph.height; ++row)
+        for (uint16_t col = 0; col < glyph.width; ++col, ++bit)
+          if (glyph.bitmap[bit >> 3] & (0x80U >> (bit & 7))) drawPixel(gx + col, gy + row, black);
+      penX += shaped.xAdvance26Dot6;
+    }
+    return;
+  }
+  if (mmSize != myanmarCachePixelSizes_.end() && myanmarShapedCache_ && myanmarShapedCache_->ready()) {
+    MyanmarShapedCacheFile::Entry entry;
+    std::vector<uint8_t> bitmap;
+    if (myanmarShapedCache_->findMetrics(text, mmSize->second, entry) &&
+        myanmarShapedCache_->loadBitmap(entry, bitmap)) {
+      uint32_t bit = 0;
+      for (uint16_t row = 0; row < entry.height; ++row)
+        for (uint16_t col = 0; col < entry.width; ++col, ++bit)
+          if (bitmap[bit >> 3] & (0x80U >> (bit & 7))) drawPixel(x + col, y + row, black);
+      return;
+    }
+  }
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
   const int yPos = y + getFontAscenderSize(resolvedFontId);
   int lastBaseX = x;
@@ -2768,6 +2868,33 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
+  if (text && *text && myanmarCachePixelSizes_.count(fontId)) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int width = 0;
+      for (size_t i = 0; i < runs.size(); ++i) {
+        width += getTextAdvanceX(fontId, runs[i].text.c_str(), style,
+                                 i + 1 == runs.size() ? followingCp : 0);
+      }
+      return width;
+    }
+  }
+  // EPUB line breaking measures advances here, not via getTextWidth().
+  // Use the same shaping metrics as drawText() for Myanmar words.
+  if (text && *text) {
+    const auto mmSize = myanmarCachePixelSizes_.find(fontId);
+    if (mmSize != myanmarCachePixelSizes_.end()) {
+      if (myanmarRuntimeFont_ && myanmarRuntimeFont_->ready() &&
+          MyanmarRuntimeFont::containsMyanmar(text) &&
+          myanmarRuntimeFont_->shape(text, mmSize->second))
+        return myanmarRuntimeFont_->widthPixels();
+      if (myanmarShapedCache_ && myanmarShapedCache_->ready()) {
+        MyanmarShapedCacheFile::Entry entry;
+        if (myanmarShapedCache_->findMetrics(text, mmSize->second, entry))
+          return entry.width;
+      }
+    }
+  }
   // Match the font drawText would use for CJK-bearing strings (see resolveTextFontId).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
   // Measure the exact codepoint stream drawText renders: bidi-reordered and
