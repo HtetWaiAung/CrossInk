@@ -194,6 +194,46 @@ std::vector<Hyphenator::BreakInfo> hangulLineEndBreaks(const std::string& word) 
   return breaks;
 }
 
+// Conservative Myanmar orthographic-syllable boundaries.  Do not split before
+// combining vowels/medials or between virama and a stacked consonant.  This is
+// not dictionary word segmentation; it only supplies safe emergency line ends.
+bool isMyanmarConsonant(const uint32_t cp) {
+  return (cp >= 0x1000 && cp <= 0x102A) || cp == 0x103F ||
+         (cp >= 0x1050 && cp <= 0x1055) || (cp >= 0x1061 && cp <= 0x1064) ||
+         (cp >= 0x1065 && cp <= 0x1066) || (cp >= 0x106E && cp <= 0x1070) ||
+         (cp >= 0x1075 && cp <= 0x1081) || (cp >= 0xAA60 && cp <= 0xAA6F);
+}
+
+bool isMyanmarCodepoint(const uint32_t cp) {
+  return (cp >= 0x1000 && cp <= 0x109F) || (cp >= 0xAA60 && cp <= 0xAA7F);
+}
+
+std::vector<Hyphenator::BreakInfo> myanmarSyllableLineEndBreaks(const std::string& text) {
+  std::vector<Hyphenator::BreakInfo> breaks;
+  const auto* const start = reinterpret_cast<const unsigned char*>(text.c_str());
+  const auto* cursor = start;
+  if (!*cursor) return breaks;
+  uint32_t previous = utf8NextCodepoint(&cursor);
+  while (*cursor) {
+    const size_t offset = static_cast<size_t>(cursor - start);
+    const uint32_t current = utf8NextCodepoint(&cursor);
+    // U+1039 is a virama; U+200D is a joiner.  Neither can terminate a
+    // shaping cluster, and the following consonant must remain attached.
+    if (isMyanmarCodepoint(previous) && isMyanmarConsonant(current) &&
+        previous != 0x1039 && previous != 0x200D) {
+      breaks.push_back({offset, false});
+    }
+    previous = current;
+  }
+  return breaks;
+}
+
+bool containsMyanmarCodepoint(const std::string& text) {
+  const auto* cursor = reinterpret_cast<const unsigned char*>(text.c_str());
+  while (*cursor) if (isMyanmarCodepoint(utf8NextCodepoint(&cursor))) return true;
+  return false;
+}
+
 std::vector<size_t> cjkCharacterBreakByteOffsets(const std::string& text) {
   struct CodepointBoundary {
     uint32_t cp;
@@ -1419,16 +1459,20 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   const auto style = wordStyles[wordIndex];
   const int leadingPadding = inlinePaddingBefore(wordIndex);
 
-  if (allowFallbackBreaks && isPathologicalUnbrokenToken(word)) {
+  if (allowFallbackBreaks && !containsMyanmarCodepoint(word) && isPathologicalUnbrokenToken(word)) {
     return splitTokenAtCodepointBoundary(wordIndex, availableWidth, renderer, fontId, wordWidths);
   }
 
-  // Hangul splits at legal CJK boundaries only at a line end when hyphenation is on.
-  auto breakInfos = hangulLineEndBreaks(word);
-  const auto hyphenBreaks = Hyphenator::breakOffsets(word, allowFallbackBreaks);
-  breakInfos.insert(breakInfos.end(), hyphenBreaks.begin(), hyphenBreaks.end());
+  // Myanmar must not use the generic Latin hyphenator (or forced codepoint
+  // split): a split within a shaping cluster corrupts marks and stacking.
+  const bool hasMyanmar = containsMyanmarCodepoint(word);
+  auto breakInfos = hasMyanmar ? myanmarSyllableLineEndBreaks(word) : hangulLineEndBreaks(word);
+  if (!hasMyanmar) {
+    const auto hyphenBreaks = Hyphenator::breakOffsets(word, allowFallbackBreaks);
+    breakInfos.insert(breakInfos.end(), hyphenBreaks.begin(), hyphenBreaks.end());
+  }
   if (breakInfos.empty()) {
-    if (allowFallbackBreaks && allowCharacterBreaks_) {
+    if (!hasMyanmar && allowFallbackBreaks && allowCharacterBreaks_) {
       return splitTokenAtCodepointBoundary(wordIndex, availableWidth, renderer, fontId, wordWidths);
     }
     return false;
@@ -1464,7 +1508,7 @@ bool ParsedText::hyphenateWordAtIndex(const size_t wordIndex, const int availabl
   }
 
   if (chosenWidth < 0) {
-    if (allowFallbackBreaks && allowCharacterBreaks_) {
+    if (!hasMyanmar && allowFallbackBreaks && allowCharacterBreaks_) {
       return splitTokenAtCodepointBoundary(wordIndex, availableWidth, renderer, fontId, wordWidths);
     }
     // No hyphenation point produced a prefix that fits in the remaining space.
@@ -1557,6 +1601,9 @@ bool ParsedText::splitTokenAtCodepointBoundary(const size_t wordIndex, const int
   const std::string& word = words[wordIndex];
   uint16_t imageId, imageWidth, imageHeight;
   if (parseInlineImageToken(word.c_str(), imageId, imageWidth, imageHeight)) return false;
+  // The emergency codepoint splitter is unsafe for Myanmar shaping clusters.
+  // Myanmar-specific syllable splits are handled by hyphenateWordAtIndex().
+  if (containsMyanmarCodepoint(word)) return false;
   if (word.size() < 2) {
     return false;
   }

@@ -108,6 +108,45 @@ void appendShapedRtlTokens(const char* text, std::string& shapedOut) {
   std::string visual;
   forEachShapedRtlToken(text, token, visual, [&shapedOut](const char* shaped) { shapedOut += shaped; });
 }
+// Partition mixed-script strings so Latin text keeps its normal font and
+// only Myanmar runs go through the HarfBuzz Myanmar font. Runs preserve UTF-8
+// codepoint boundaries. Never split a Myanmar combining mark from its base.
+struct MyanmarScriptRun {
+  std::string text;
+  bool myanmar;
+};
+
+bool splitMixedMyanmarRuns(const char* text, std::vector<MyanmarScriptRun>& runs) {
+  if (!text) return false;
+  const auto* p = reinterpret_cast<const unsigned char*>(text);
+  bool hasMyanmar = false;
+  bool hasOther = false;
+  while (*p) {
+    const auto* start = p;
+    uint32_t cp = *p;
+    size_t length = 1;
+    if ((p[0] & 0xE0) == 0xC0 && p[1]) {
+      cp = ((p[0] & 31) << 6) | (p[1] & 63);
+      length = 2;
+    } else if ((p[0] & 0xF0) == 0xE0 && p[1] && p[2]) {
+      cp = ((p[0] & 15) << 12) | ((p[1] & 63) << 6) | (p[2] & 63);
+      length = 3;
+    } else if ((p[0] & 0xF8) == 0xF0 && p[1] && p[2] && p[3]) {
+      cp = ((p[0] & 7) << 18) | ((p[1] & 63) << 12) | ((p[2] & 63) << 6) | (p[3] & 63);
+      length = 4;
+    }
+    const bool mm = (cp >= 0x1000 && cp <= 0x109F) ||
+                    (cp >= 0xAA60 && cp <= 0xAA7F) ||
+                    (cp >= 0xA9E0 && cp <= 0xA9FF);
+    hasMyanmar |= mm;
+    hasOther |= !mm;
+    if (runs.empty() || runs.back().myanmar != mm) runs.push_back({{}, mm});
+    runs.back().text.append(reinterpret_cast<const char*>(start), length);
+    p += length;
+  }
+  return hasMyanmar && hasOther;
+}
+
 }  // namespace
 
 const uint8_t* GfxRenderer::getGlyphBitmap(const EpdFontData* fontData, const EpdGlyph* glyph) const {
@@ -1024,6 +1063,19 @@ const char* resolveVisualText(const char* text, std::string& visualBuffer, const
 }
 }  // namespace
 
+// Resolve the Myanmar atlas for any active reading font. EPUB text blocks may
+// select another point-size family member or an SD-card font after setup.
+// Keep the 17/21/25 px strikes supported by the bundled MYGA atlas.
+uint16_t GfxRenderer::myanmarPixelSizeForFont(const int fontId) const {
+  const auto mapped = myanmarCachePixelSizes_.find(fontId);
+  if (mapped != myanmarCachePixelSizes_.end()) return mapped->second;
+  if (!myanmarRuntimeFont_ || !myanmarRuntimeFont_->ready()) return 0;
+  // Only use this fallback for real reader fonts, not arbitrary unknown IDs.
+  if (fontMap.find(fontId) == fontMap.end() && sdCardFonts_.find(fontId) == sdCardFonts_.end()) return 0;
+  const uint8_t pt = getFontPointSize(fontId);
+  return pt && pt <= 10 ? 21 : 25;
+}
+
 int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style,
                               const BidiUtils::BidiBaseDir baseDir) const {
 #if CROSSINK_SCALABLE_FONTS
@@ -1033,6 +1085,24 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     return 0;
   }
 
+  if (myanmarPixelSizeForFont(fontId) != 0) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int width = 0;
+      for (const auto& run : runs) width += getTextWidth(fontId, run.text.c_str(), style, baseDir);
+      return width;
+    }
+  }
+  const uint16_t mmSize = myanmarPixelSizeForFont(fontId);
+  if (mmSize != 0 && myanmarRuntimeFont_ &&
+      myanmarRuntimeFont_->ready() && MyanmarRuntimeFont::containsMyanmar(text) &&
+      myanmarRuntimeFont_->shape(text, mmSize)) {
+    return myanmarRuntimeFont_->widthPixels();
+  }
+  if (mmSize != 0 && myanmarShapedCache_ && myanmarShapedCache_->ready()) {
+    MyanmarShapedCacheFile::Entry entry;
+    if (myanmarShapedCache_->findMetrics(text, mmSize, entry)) return entry.width;
+  }
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
 
   std::string visualBuffer;
@@ -1117,6 +1187,62 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     return;
   }
 
+  if (myanmarPixelSizeForFont(fontId) != 0) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int runX = x;
+      for (const auto& run : runs) {
+        drawText(fontId, runX, y, run.text.c_str(), black, style, baseDir);
+        runX += getTextWidth(fontId, run.text.c_str(), style, baseDir);
+      }
+      return;
+    }
+  }
+  const uint16_t mmSize = myanmarPixelSizeForFont(fontId);
+  if (mmSize != 0 && myanmarRuntimeFont_ &&
+      myanmarRuntimeFont_->ready() && MyanmarRuntimeFont::containsMyanmar(text) &&
+      myanmarRuntimeFont_->shape(text, mmSize)) {
+    // HarfBuzz glyph positions are 26.6 fixed-point values. Keep both pen
+    // coordinates in 26.6 until rasterization; apply each GPOS offset once.
+    // (The atlas's left/top are FreeType bitmap-bearing coordinates, not an
+    // additional text-layout advance.)
+    int64_t penX26_6 = static_cast<int64_t>(x) * 64;
+    int64_t penY26_6 = static_cast<int64_t>(y + mmSize) * 64;
+    for (size_t i = 0; i < myanmarRuntimeFont_->glyphCount(); ++i) {
+      MyanmarRuntimeFont::ShapedGlyph shaped;
+      MyanmarGlyphAtlas::Glyph glyph;
+      const bool bitmapAvailable = myanmarRuntimeFont_->glyph(i, shaped, glyph);
+      if (!bitmapAvailable) {
+        // The glyph ID is still part of the shaped run. Advance even if its
+        // atlas bitmap is missing (e.g. an unsupported font size).
+        // The runtime exposes the shaped advance separately below.
+        if (!myanmarRuntimeFont_->shapedGlyph(i, shaped)) continue;
+      }
+      if (bitmapAvailable) {
+        const int gx = static_cast<int>((penX26_6 + shaped.xOffset26Dot6 + 32) / 64) + glyph.left;
+        const int gy = static_cast<int>((penY26_6 - shaped.yOffset26Dot6 + 32) / 64) - glyph.top;
+        uint32_t bit = 0;
+        for (uint16_t row = 0; row < glyph.height; ++row)
+          for (uint16_t col = 0; col < glyph.width; ++col, ++bit)
+            if (glyph.bitmap[bit >> 3] & (0x80U >> (bit & 7))) drawPixel(gx + col, gy + row, black);
+      }
+      penX26_6 += shaped.xAdvance26Dot6;
+      penY26_6 -= shaped.yAdvance26Dot6;
+    }
+    return;
+  }
+  if (mmSize != 0 && myanmarShapedCache_ && myanmarShapedCache_->ready()) {
+    MyanmarShapedCacheFile::Entry entry;
+    std::vector<uint8_t> bitmap;
+    if (myanmarShapedCache_->findMetrics(text, mmSize, entry) &&
+        myanmarShapedCache_->loadBitmap(entry, bitmap)) {
+      uint32_t bit = 0;
+      for (uint16_t row = 0; row < entry.height; ++row)
+        for (uint16_t col = 0; col < entry.width; ++col, ++bit)
+          if (bitmap[bit >> 3] & (0x80U >> (bit & 7))) drawPixel(x + col, y + row, black);
+      return;
+    }
+  }
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
   const int yPos = y + getFontAscenderSize(resolvedFontId);
   int lastBaseX = x;
@@ -2768,6 +2894,33 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
 #endif
+  if (text && *text && myanmarPixelSizeForFont(fontId) != 0) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int width = 0;
+      for (size_t i = 0; i < runs.size(); ++i) {
+        width += getTextAdvanceX(fontId, runs[i].text.c_str(), style,
+                                 i + 1 == runs.size() ? followingCp : 0);
+      }
+      return width;
+    }
+  }
+  // EPUB line breaking measures advances here, not via getTextWidth().
+  // Use the same shaping metrics as drawText() for Myanmar words.
+  if (text && *text) {
+    const uint16_t mmSize = myanmarPixelSizeForFont(fontId);
+    if (mmSize != 0) {
+      if (myanmarRuntimeFont_ && myanmarRuntimeFont_->ready() &&
+          MyanmarRuntimeFont::containsMyanmar(text) &&
+          myanmarRuntimeFont_->shape(text, mmSize))
+        return myanmarRuntimeFont_->widthPixels();
+      if (myanmarShapedCache_ && myanmarShapedCache_->ready()) {
+        MyanmarShapedCacheFile::Entry entry;
+        if (myanmarShapedCache_->findMetrics(text, mmSize, entry))
+          return entry.width;
+      }
+    }
+  }
   // Match the font drawText would use for CJK-bearing strings (see resolveTextFontId).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
   // Measure the exact codepoint stream drawText renders: bidi-reordered and

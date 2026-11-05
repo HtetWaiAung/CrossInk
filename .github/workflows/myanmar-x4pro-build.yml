@@ -1,0 +1,33 @@
+name: Build CrossInk Myanmar X4 Pro (experimental)
+on:
+  workflow_dispatch:
+  push:
+    branches: [myanmar-x4pro]
+permissions:
+  contents: read
+jobs:
+  x4-pro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PlatformIO
+        run: python -m pip install https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+      - name: Build CrossInk X4 Pro
+        run: |
+          set -o pipefail
+          pio run -e x4-pro -j 2 2>&1 | tee build-x4-pro.log
+      - name: Upload build artifacts and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossink-myanmar-x4pro-experimental
+          path: |
+            .pio/build/x4-pro/*.bin
+            .pio/build/x4-pro/*.elf
+            build-x4-pro.log
+          if-no-files-found: warn
