@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "ScalableFontSizing.h"
 
@@ -65,6 +66,17 @@ class HalScalableFont {
   static uint32_t renderingRevision();
   uint32_t fingerprint() const { return hash_; }
   const EpdFont* atSize(uint8_t points);
+  struct MyanmarGlyphPosition {
+    uint32_t glyphId = 0;
+    int32_t advanceX26_6 = 0;
+    int32_t advanceY26_6 = 0;
+    int32_t offsetX26_6 = 0;
+    int32_t offsetY26_6 = 0;
+  };
+  // Shape using this exact TTF face (including bold/italic) at CrossInk's
+  // point-size scale; FreeType rasterizes returned glyph IDs, not codepoints.
+  bool shapeMyanmar(const char* utf8, uint8_t points, std::vector<MyanmarGlyphPosition>& out);
+
 
  private:
   struct Size {
@@ -82,6 +94,8 @@ class HalScalableFont {
   static int8_t kerning(void* ctx, uint32_t left, uint32_t right);
   static uint32_t ligature(void* ctx, uint32_t left, uint32_t right);
   static unsigned long streamRead(void* ctx, unsigned long offset, unsigned char* buffer, unsigned long count);
+  bool readFontBytes(size_t offset, uint8_t* data, size_t count);
+
   static constexpr size_t StreamWindowBytes = 1024;
   static constexpr size_t StreamWindowCount = 4;
   static constexpr size_t StreamBufferBytes = StreamWindowBytes * StreamWindowCount;
@@ -118,6 +132,10 @@ class HalScalableFont {
   size_t nextStreamWindow_ = 0;
   bool streamed_ = false;
   // Declared last so it releases borrowed bytes/the stream before their owners.
+  // Lazily cached HarfBuzz objects. The face reads only requested SFNT tables
+  // from this font source; all objects are released before the TTF bytes.
+  void* hbFace_ = nullptr;
+  void* hbFont_ = nullptr;
   freeink::font::FtFont font_;
 };
 #endif

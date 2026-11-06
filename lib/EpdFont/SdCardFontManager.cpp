@@ -148,6 +148,9 @@ void SdCardFontManager::unloadAll(GfxRenderer& renderer) {
   // Drop UI CJK fallbacks before the SD fonts they point at are freed.
   renderer.clearFallbackFonts();
   renderer.clearSdCardFonts();
+#if CROSSINK_SCALABLE_FONTS
+  renderer.clearMyanmarScalableFonts();
+#endif
   for (auto& lf : loaded_) {
     renderer.removeFont(lf.fontId);
     delete lf.font;
@@ -190,6 +193,8 @@ int SdCardFontManager::registerScalableSize(GfxRenderer& renderer, uint8_t size)
   loaded_.reserve(ScalableContentMaxPointSize - ScalableContentMinPointSize + 1);
   loaded_.push_back({nullptr, id, size});
   renderer.insertFont(id, EpdFontFamily(styles[0], styles[1], styles[2], styles[3]));
+  renderer.registerMyanmarScalableFont(id, scalable_[0].get(), scalable_[1].get(),
+                                      scalable_[2].get(), scalable_[3].get());
   return id;
 }
 bool SdCardFontManager::registerScalableContentSizes(GfxRenderer& renderer) {
@@ -213,6 +218,7 @@ bool SdCardFontManager::setScalableRenderOptions(GfxRenderer& renderer,
 
   renderer.clearFallbackFonts();
   renderer.clearSdCardFonts();
+  renderer.clearMyanmarScalableFonts();
   for (auto& loaded : loaded_) renderer.removeFont(loaded.fontId);
   loaded_.clear();
   activeScalableId_ = 0;

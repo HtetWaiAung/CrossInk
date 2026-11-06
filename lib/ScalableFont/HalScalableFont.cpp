@@ -10,6 +10,7 @@
 
 #include "FixedArenaAllocator.h"
 #include "ScalableFontSizing.h"
+#include "../HarfBuzzTiny/src/hb-ot.h"
 
 namespace {
 SemaphoreHandle_t renderMutex = nullptr;
@@ -342,6 +343,8 @@ ScalableFontAccess::~ScalableFontAccess() {
 }
 HalScalableFont::~HalScalableFont() {
   ScalableFontAccess access;
+  if (hbFont_) hb_font_destroy(static_cast<hb_font_t*>(hbFont_));
+  if (hbFace_) hb_face_destroy(static_cast<hb_face_t*>(hbFace_));
   if (font_.ready() && liveRuntime) liveRuntime->clearCaches();
   font_.deinit();
   streamFile_.close();
@@ -655,6 +658,85 @@ bool HalScalableFont::openFile(const char* path, size_t remainingBytes,
           mode == FileMode::Temporary ? "Temporary streamed" : "Streaming", path, unsigned(size),
           unsigned(contentHash_), unsigned(font_.glyphId('T')), unsigned(heap.free), unsigned(heap.largest));
   return true;
+}
+
+bool HalScalableFont::readFontBytes(const size_t offset, uint8_t* data, const size_t count) {
+  if (!data || offset > fileBytes_ || count > fileBytes_ - offset) return false;
+  if (!streamed_) {
+    if (!bytes_) return false;
+    std::memcpy(data, bytes_.get() + offset, count);
+    return true;
+  }
+  return streamRead(this, static_cast<unsigned long>(offset), data,
+                    static_cast<unsigned long>(count)) == count;
+}
+
+bool HalScalableFont::shapeMyanmar(const char* utf8, const uint8_t points,
+                                  std::vector<MyanmarGlyphPosition>& out) {
+  ScalableFontAccess access;
+  out.clear();
+  if (!font_.ready() || !utf8 || !*utf8 || !fileBytes_ || !atSize(points)) return false;
+  // HarfBuzz requires only SFNT tables; read from CrossInk's already-open
+  // font source, including its bounded SD-card streaming cache.
+  struct TableContext {
+    static uint16_t u16(const uint8_t* p) { return (uint16_t(p[0]) << 8) | p[1]; }
+    static uint32_t u32(const uint8_t* p) {
+      return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+             (uint32_t(p[2]) << 8) | p[3];
+    }
+    static hb_blob_t* table(hb_face_t*, hb_tag_t requested, void* user) {
+      auto& src = *static_cast<HalScalableFont*>(user);
+      uint8_t header[12] = {};
+      if (!src.readFontBytes(0, header, sizeof(header))) return hb_blob_get_empty();
+      const unsigned count = u16(header + 4);
+      if (count > 4096 || 12u + 16u * count > src.fileBytes_) return hb_blob_get_empty();
+      for (unsigned i = 0; i < count; ++i) {
+        uint8_t record[16];
+        if (!src.readFontBytes(12u + 16u * i, record, sizeof(record))) return hb_blob_get_empty();
+        if (u32(record) != requested) continue;
+        const size_t offset = u32(record + 8), length = u32(record + 12);
+        if (offset > src.fileBytes_ || length > src.fileBytes_ - offset || length > 4u * 1024u * 1024u)
+          return hb_blob_get_empty();
+        std::vector<char> bytes(length);
+        if (length && !src.readFontBytes(offset, reinterpret_cast<uint8_t*>(bytes.data()), length))
+          return hb_blob_get_empty();
+        // DUPLICATE owns the table bytes after this function returns.
+        return hb_blob_create(bytes.data(), static_cast<unsigned>(length),
+                              HB_MEMORY_MODE_DUPLICATE, nullptr, nullptr);
+      }
+      return hb_blob_get_empty();
+    }
+  };
+  if (!hbFace_) {
+    hb_face_t* face = hb_face_create_for_tables(TableContext::table, this, nullptr);
+    if (!face || hb_face_get_glyph_count(face) == 0) {
+      if (face) hb_face_destroy(face);
+      return false;
+    }
+    hbFace_ = face;
+    hbFont_ = hb_font_create(face);
+    hb_ot_font_set_funcs(static_cast<hb_font_t*>(hbFont_));
+  }
+  hb_font_t* hbFont = static_cast<hb_font_t*>(hbFont_);
+  const int32_t scale = static_cast<int32_t>(scalableFontPixelSize26_6(points));
+  hb_font_set_scale(hbFont, scale, scale);
+  hb_buffer_t* buffer = hb_buffer_create();
+  hb_buffer_add_utf8(buffer, utf8, -1, 0, -1);
+  hb_buffer_set_direction(buffer, HB_DIRECTION_LTR);
+  hb_buffer_set_script(buffer, HB_SCRIPT_MYANMAR);
+  hb_buffer_set_language(buffer, hb_language_from_string("my", -1));
+  hb_shape(hbFont, buffer, nullptr, 0);
+  unsigned count = 0;
+  const hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buffer, &count);
+  const hb_glyph_position_t* pos = hb_buffer_get_glyph_positions(buffer, &count);
+  if (infos && pos && count) {
+    out.reserve(count);
+    for (unsigned i = 0; i < count; ++i)
+      out.push_back({infos[i].codepoint, pos[i].x_advance, pos[i].y_advance,
+                     pos[i].x_offset, pos[i].y_offset});
+  }
+  hb_buffer_destroy(buffer);
+  return !out.empty();
 }
 
 unsigned long HalScalableFont::streamRead(void* ctx, unsigned long offset, unsigned char* buffer, unsigned long count) {

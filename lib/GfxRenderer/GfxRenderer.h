@@ -17,6 +17,7 @@ enum class BidiBaseDir : signed char { AUTO = -1, LTR = 0, RTL = 1 };
 
 class FontCacheManager;
 class SdCardFont;
+class HalScalableFont;
 
 #include <cassert>
 #include <cstring>
@@ -42,6 +43,13 @@ class GfxRenderer {
   void setMyanmarShapedCache(MyanmarShapedCacheFile* cache) { myanmarShapedCache_ = cache; }
   void registerMyanmarCacheFont(int id, uint16_t px) { myanmarCachePixelSizes_[id] = px; }
   uint16_t myanmarPixelSizeForFont(int fontId) const;
+#if CROSSINK_SCALABLE_FONTS
+  void registerMyanmarScalableFont(int fontId, HalScalableFont* regular, HalScalableFont* bold,
+                                   HalScalableFont* italic, HalScalableFont* boldItalic) {
+    scalableMyanmarFaces_[fontId] = {regular, bold, italic, boldItalic};
+  }
+  void clearMyanmarScalableFonts() { scalableMyanmarFaces_.clear(); }
+#endif
 
 
   // Logical screen orientation from the perspective of callers
@@ -118,6 +126,16 @@ class GfxRenderer {
   mutable MyanmarRuntimeFont* myanmarRuntimeFont_ = nullptr;
   mutable MyanmarShapedCacheFile* myanmarShapedCache_ = nullptr;
   std::map<int, uint16_t> myanmarCachePixelSizes_;
+#if CROSSINK_SCALABLE_FONTS
+  struct ScalableMyanmarFaces {
+    HalScalableFont* faces[4] = {};
+    HalScalableFont* forStyle(EpdFontFamily::Style style) const {
+      const int index = static_cast<int>(style) & 3;
+      return faces[index] ? faces[index] : faces[0];
+    }
+  };
+  std::map<int, ScalableMyanmarFaces> scalableMyanmarFaces_;
+#endif
 
 
   // CJK UI font fallback map: primary (built-in, Latin-only) UI font id -> a

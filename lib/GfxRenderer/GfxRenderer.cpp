@@ -1067,6 +1067,9 @@ const char* resolveVisualText(const char* text, std::string& visualBuffer, const
 // select another point-size family member or an SD-card font after setup.
 // Keep the 17/21/25 px strikes supported by the bundled MYGA atlas.
 uint16_t GfxRenderer::myanmarPixelSizeForFont(const int fontId) const {
+#if CROSSINK_SCALABLE_FONTS
+  if (scalableMyanmarFaces_.find(fontId) != scalableMyanmarFaces_.end()) return 0;
+#endif
   const auto mapped = myanmarCachePixelSizes_.find(fontId);
   if (mapped != myanmarCachePixelSizes_.end()) return mapped->second;
   if (!myanmarRuntimeFont_ || !myanmarRuntimeFont_->ready()) return 0;
@@ -1075,6 +1078,15 @@ uint16_t GfxRenderer::myanmarPixelSizeForFont(const int fontId) const {
   const uint8_t pt = getFontPointSize(fontId);
   return pt && pt <= 10 ? 21 : 25;
 }
+
+#if CROSSINK_SCALABLE_FONTS
+namespace {
+constexpr uint32_t kCrossInkShapedGlyphId = 0x80000000u;
+int rounded26_6(const int64_t value) {
+  return static_cast<int>(value >= 0 ? (value + 32) / 64 : -((-value + 32) / 64));
+}
+}
+#endif
 
 int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style,
                               const BidiUtils::BidiBaseDir baseDir) const {
@@ -1085,6 +1097,25 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     return 0;
   }
 
+#if CROSSINK_SCALABLE_FONTS
+  const auto nativeIt = scalableMyanmarFaces_.find(fontId);
+  if (nativeIt != scalableMyanmarFaces_.end() && MyanmarRuntimeFont::containsMyanmar(text)) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int width = 0;
+      for (const auto& run : runs) width += getTextWidth(fontId, run.text.c_str(), style, baseDir);
+      return width;
+    }
+    if (auto* face = nativeIt->second.forStyle(style)) {
+      std::vector<HalScalableFont::MyanmarGlyphPosition> glyphs;
+      if (face->shapeMyanmar(text, getFontPointSize(fontId), glyphs)) {
+        int64_t advance = 0;
+        for (const auto& g : glyphs) advance += g.advanceX26_6;
+        return rounded26_6(advance);
+      }
+    }
+  }
+#endif
   if (myanmarPixelSizeForFont(fontId) != 0) {
     std::vector<MyanmarScriptRun> runs;
     if (splitMixedMyanmarRuns(text, runs)) {
@@ -1187,6 +1218,38 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     return;
   }
 
+#if CROSSINK_SCALABLE_FONTS
+  const auto nativeIt = scalableMyanmarFaces_.find(fontId);
+  if (nativeIt != scalableMyanmarFaces_.end() && MyanmarRuntimeFont::containsMyanmar(text)) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int runX = x;
+      for (const auto& run : runs) {
+        drawText(fontId, runX, y, run.text.c_str(), black, style, baseDir);
+        runX += getTextWidth(fontId, run.text.c_str(), style, baseDir);
+      }
+      return;
+    }
+    if (auto* face = nativeIt->second.forStyle(style)) {
+      std::vector<HalScalableFont::MyanmarGlyphPosition> glyphs;
+      if (face->shapeMyanmar(text, getFontPointSize(fontId), glyphs)) {
+        const auto fit = fontMap.find(fontId);
+        if (fit == fontMap.end()) return;
+        const auto& family = fit->second;
+        int64_t px = int64_t(x) * 64, py = int64_t(y + getFontAscenderSize(fontId)) * 64;
+        for (const auto& g : glyphs) {
+          const int gx = rounded26_6(px + g.offsetX26_6);
+          const int gy = rounded26_6(py - g.offsetY26_6);
+          renderCharImpl<TextRotation::None>(*this, renderMode, family,
+              kCrossInkShapedGlyphId | g.glyphId, gx, gy, black, style);
+          px += g.advanceX26_6;
+          py -= g.advanceY26_6;
+        }
+        return;
+      }
+    }
+  }
+#endif
   if (myanmarPixelSizeForFont(fontId) != 0) {
     std::vector<MyanmarScriptRun> runs;
     if (splitMixedMyanmarRuns(text, runs)) {
@@ -2893,6 +2956,26 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
                                  const uint32_t followingCp) const {
 #if CROSSINK_SCALABLE_FONTS
   ScalableFontAccess access;
+#endif
+#if CROSSINK_SCALABLE_FONTS
+  if (text && *text && scalableMyanmarFaces_.count(fontId) && MyanmarRuntimeFont::containsMyanmar(text)) {
+    std::vector<MyanmarScriptRun> runs;
+    if (splitMixedMyanmarRuns(text, runs)) {
+      int width = 0;
+      for (size_t i = 0; i < runs.size(); ++i)
+        width += getTextAdvanceX(fontId, runs[i].text.c_str(), style,
+                                  i + 1 == runs.size() ? followingCp : 0);
+      return width;
+    }
+    if (auto* face = scalableMyanmarFaces_.at(fontId).forStyle(style)) {
+      std::vector<HalScalableFont::MyanmarGlyphPosition> glyphs;
+      if (face->shapeMyanmar(text, getFontPointSize(fontId), glyphs)) {
+        int64_t width = 0;
+        for (const auto& g : glyphs) width += g.advanceX26_6;
+        return rounded26_6(width);
+      }
+    }
+  }
 #endif
   if (text && *text && myanmarPixelSizeForFont(fontId) != 0) {
     std::vector<MyanmarScriptRun> runs;
