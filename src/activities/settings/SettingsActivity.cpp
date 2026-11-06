@@ -151,7 +151,7 @@ std::string formatCompactDuration(const uint32_t seconds) {
 
 void drawSystemVersionFooter(const GfxRenderer& renderer, const int pageWidth, const int pageHeight,
                              const ThemeMetrics& metrics) {
-  const std::string label = AppVersion::versionLabel();
+  const std::string label = "CrossInk 1.6.1-x4-pro by 4htet";
   const int maxWidth = pageWidth - systemVersionFooterSideMargin * 2;
   const int bottomLineY =
       pageHeight - metrics.buttonHintsHeight - metrics.verticalSpacing - systemVersionFooterBottomInset;
